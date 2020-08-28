@@ -1,16 +1,20 @@
+import math
 import time
+import wave
+
+import noisereduce as nr
 import numpy as np
 import pyaudio
-import wave
-import noisereduce as nr
-import math
 
 RATE = 44100
+FORMAT = pyaudio.paInt16
 CHUNK = 2048
 WIDTH = 2
 THRESH = -55
 NOISE_LEN = 16
 RECORD_SECONDS = 5
+WIN_LENGTH = CHUNK // 2
+HOP_LENGTH = CHUNK // 4
 
 
 def int16_to_float32(data):
@@ -37,8 +41,6 @@ def np_audioop_rms(data, width):
 
 
 def main():
-    FORMAT = pyaudio.paInt16
-    start = time.perf_counter()
     aud = pyaudio.PyAudio()
     stream = aud.open(format=FORMAT, channels=1, rate=RATE, input=True, output=True, frames_per_buffer=CHUNK)
 
@@ -50,8 +52,8 @@ def main():
     print("recording")
     print("Processing (per sample) needs to be done in less than {} miliseconds".format(1000*CHUNK/RATE))
     sTime = time.time()
-    lThresh = time.time()
-    avgQuiet = -90
+    lThresh = time.time() - 1
+    avgQuiet = -60
 
     while time.time() - sTime < RECORD_SECONDS:
         data = stream.read(CHUNK)
@@ -71,23 +73,28 @@ def main():
                     noise.append(data)
                     if len(noise) > NOISE_LEN:
                         noise.pop(0)
-                return
         else:
             lThresh = time.time()
 
         unpFrames.append(data)
 
-        tim = time.perf_counter()
+        if noise:
+            tim = time.perf_counter()
 
-        data = np.frombuffer(data, np.int16)
-        data = int16_to_float32(data)
-        data = nr.reduce_noise(audio_clip=data, noise_clip=int16_to_float32(np.frombuffer(b''.join(noise), np.int16)),
-                               verbose=False, n_std_thresh=1, prop_decrease=1.5, win_length=CHUNK // 2, n_fft=CHUNK // 2, hop_length=CHUNK // 4, n_grad_freq=4)
-        data = float32_to_int16(data)
-        data = np.ndarray.tobytes(data)
+            data = np.frombuffer(data, np.int16)
+            data = int16_to_float32(data)
+            nData = int16_to_float32(np.frombuffer(b''.join(noise), np.int16))
+
+            data = nr.reduce_noise(audio_clip=data, noise_clip=nData,
+                                   verbose=False, n_std_thresh=1.5, prop_decrease=1,
+                                   win_length=WIN_LENGTH, n_fft=WIN_LENGTH, hop_length=HOP_LENGTH,
+                                   n_grad_freq=4)
+
+            data = float32_to_int16(data)
+            data = np.ndarray.tobytes(data)
+            times += [1000*(time.perf_counter()-tim)]
+
         frames.append(data)
-
-        times += [1000*(time.perf_counter()-tim)]
 
     times.pop(0)  # first one is always an outlier
 
@@ -100,6 +107,22 @@ def main():
     time.sleep(.5)
 
     stream.write(b''.join(frames))  # play the processed frames back
+
+    time.sleep(.5)
+
+    post = b''.join(unpFrames)
+    post = np.frombuffer(post, np.int16)
+    post = int16_to_float32(post)
+    nData = int16_to_float32(np.frombuffer(b''.join(noise), np.int16))
+    post = nr.reduce_noise(audio_clip=post, noise_clip=nData,
+                           verbose=False, n_std_thresh=1.5, prop_decrease=1,
+                           win_length=WIN_LENGTH, n_fft=WIN_LENGTH, hop_length=HOP_LENGTH,
+                           n_grad_freq=4)
+
+    post = float32_to_int16(post)
+    post = np.ndarray.tobytes(post)
+
+    stream.write(post)  # test to compare the whole thing processed at once
 
     # save the processed frames to a wav file for future reference
     waveFile = wave.open("test.wav", 'wb')
